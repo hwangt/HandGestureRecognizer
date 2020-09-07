@@ -16,12 +16,27 @@ import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
 
 from torch.utils.tensorboard import SummaryWriter
+
+
 # from tensorboardX import SummaryWriter
 
 
 def main():
+    # Use GPU if available
+    use_gpu = torch.cuda.is_available()
+    device = torch.device('cuda' if use_gpu else 'cpu')
+
+    if use_gpu:
+        gpu = torch.cuda.current_device()
+        print(f"Currently using GPU {gpu}")
+        cudnn.benchmark = True
+        torch.cuda.manual_seed_all(40)
+    else:
+        print("Currently using CPU")
+
     # Load a dataset of keypoints
     dataset = HgmDataset()
     total_size = len(dataset)
@@ -34,8 +49,6 @@ def main():
     test_pct = 0.05
     assert train_pct + validate_pct + test_pct == 1.0
 
-    # train_validate_ratio = 0.9
-
     train_size = int(train_pct * total_size)
     validate_size = int(validate_pct * total_size)
     test_size = total_size - train_size - validate_size
@@ -45,31 +58,34 @@ def main():
     print(f'Test %: {test_pct}, Test samples: {test_size}')
 
     batch_size = 2
-    num_epochs = 100
+    num_epochs = 150
     # num_iter = math.ceil(train_size / batch_size)
-    train_dataset, valid_dataset, test_dataset = torch.utils.data.dataset.random_split(dataset, dataset_lengths, generator=torch.Generator().manual_seed(40))
+    train_dataset, valid_dataset, test_dataset = torch.utils.data.dataset.random_split(dataset, dataset_lengths,
+                                                                                       generator=torch.Generator().manual_seed(
+                                                                                           40))
 
+    pin_memory = True if use_gpu else False
     # Create the DataLoaders
     train_dataloader = torch.utils.data.DataLoader(dataset=train_dataset,
                                                    batch_size=batch_size,
                                                    shuffle=True,
                                                    # num_workers=4,
-                                                   pin_memory=True)
+                                                   pin_memory=pin_memory)
 
     validate_dataloader = torch.utils.data.DataLoader(dataset=valid_dataset,
                                                       batch_size=batch_size,
                                                       shuffle=True,
                                                       # num_workers=4,
-                                                      pin_memory=True)
+                                                      pin_memory=pin_memory)
 
     test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset,
                                                   batch_size=batch_size,
                                                   shuffle=True,
                                                   # num_workers=4,
-                                                  pin_memory=True)
+                                                  pin_memory=pin_memory)
 
     # Create the model
-    model = KeypointToGestureStatic()
+    model = KeypointToGestureStatic().to(device)
     print(f'Model {model}')
 
     # Add model graph to Tensorboard
@@ -79,7 +95,7 @@ def main():
     writer = SummaryWriter(tensorboard_save_path)
     dataiter = iter(validate_dataloader)
     keypts, _ = dataiter.next()
-    writer.add_graph(model, keypts)
+    writer.add_graph(model, keypts.to(device))
 
     # Add embedding visualization to tensorboard
     # embeddings, labels = select_n_random(data=dataset.keypoints_files,
@@ -104,17 +120,23 @@ def main():
         train_loss = train(dataloader=train_dataloader,
                            model=model,
                            optimizer=optimizer,
-                           curr_epoch=epoch)
+                           use_gpu=use_gpu,
+                           device=device,
+                           curr_epoch=epoch, )
 
         validate_loss = validate(dataloader=validate_dataloader,
                                  model=model,
-                                 curr_epoch=epoch)
+                                 use_gpu=use_gpu,
+                                 device=device,
+                                 curr_epoch=epoch, )
 
         test_loss = test(dataset=dataset,
                          dataloader=test_dataloader,
                          model=model,
                          writer=writer,
-                         pr_curve=False)
+                         use_gpu=use_gpu,
+                         device=device,
+                         pr_curve=False, )
 
         loss_dict = {
             'train': train_loss.avg,
@@ -136,29 +158,37 @@ def main():
     # PR curves in Tensorboard for the best model
     best_model = KeypointToGestureStatic()
     best_model.load_model_for_inference('checkpoints/k2gs_model_only_best.pt')
+    if use_gpu:
+        best_model.to(device)
     test(dataset=dataset,
          dataloader=test_dataloader,
          model=best_model,
          writer=writer,
-         pr_curve=True)
+         use_gpu=use_gpu,
+         device=device,
+         pr_curve=True,)
     writer.close()
     return
 
-def train(dataloader, model, optimizer, curr_epoch):
+
+def train(dataloader, model, optimizer, use_gpu, device, curr_epoch):
     model.train()
     avg_loss = AverageMeter()
     for i, (keypoints, targets) in enumerate(dataloader):
         input = torch.autograd.Variable(keypoints)
         targets = torch.autograd.Variable(targets)
+        if use_gpu:
+            input, targets = input.to(device), targets.to(device)
 
-        # input = input.view(-1, 21 * 3)
         optimizer.zero_grad()
 
         pred = model(input)
-
         loss_fn = nn.CrossEntropyLoss()
         loss = loss_fn(pred, targets)
-        avg_loss.update(loss)
+        if use_gpu:
+            avg_loss.update(loss.cpu())
+        else:
+            avg_loss.update(loss)
         loss.backward()
         optimizer.step()
 
@@ -166,15 +196,15 @@ def train(dataloader, model, optimizer, curr_epoch):
     return avg_loss
 
 
-def validate(dataloader, model, curr_epoch):
+def validate(dataloader, model, use_gpu, device, curr_epoch):
     model.eval()
     avg_loss = AverageMeter()
 
     for i, (keypoints, targets) in enumerate(dataloader):
         input = torch.autograd.Variable(keypoints)
         targets = torch.autograd.Variable(targets)
-
-        # input = input.view(-1, 21 * 3)
+        if use_gpu:
+            input, targets = input.to(device), targets.to(device)
 
         with torch.no_grad():
             pred = model(input)
@@ -187,7 +217,7 @@ def validate(dataloader, model, curr_epoch):
     return avg_loss
 
 
-def test(dataset, dataloader, model, writer, pr_curve=False):
+def test(dataset, dataloader, model, writer, use_gpu, device, pr_curve=False):
     model.eval()
     avg_loss = AverageMeter()
     class_probs = []
@@ -197,12 +227,19 @@ def test(dataset, dataloader, model, writer, pr_curve=False):
         for i, (keypoints, targets) in enumerate(dataloader):
             input = torch.autograd.Variable(keypoints)
             targets = torch.autograd.Variable(targets)
+            if use_gpu:
+                input, targets = input.to(device), targets.to(device)
 
             output = model(input)
             class_probs_batch = [F.softmax(el, dim=0) for el in output]
             _, class_preds_batch = torch.max(output, 1)
-            class_probs.append(class_probs_batch)
-            class_preds.append(class_preds_batch)
+            if use_gpu:
+                class_probs_batch = [p.to(device) for p in class_probs_batch]
+                class_probs.append(class_probs_batch)
+                class_preds.append(class_preds_batch.to(device))
+            else:
+                class_probs.append(class_probs_batch)
+                class_preds.append(class_preds_batch)
 
             loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(output, targets)

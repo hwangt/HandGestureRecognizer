@@ -7,7 +7,7 @@ from sklearn.manifold import TSNE
 
 def compute_embeddings(dataloader, model):
     model.eval()
-    embeddings = np.empty((1,5))
+    embeddings = np.empty((1,6))
     labels = np.empty((1,))
 
     for i, (keypoints, targets) in enumerate(dataloader):
@@ -38,7 +38,7 @@ def tsne_plot(x, labels):
     ax.axis('tight')
 
     # add the labels for each digit corresponding to the label
-    txts = ["F", "G", "L", "O", "Y"]
+    txts = ["F", "G", "L", "O", "Y", "unk"]
 
     for i in range(num_classes):
         # Position of each label at median of data points.

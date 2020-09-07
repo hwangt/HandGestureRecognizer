@@ -26,7 +26,7 @@ class HgmDataset(Dataset):
         # For this dataset, there are four camera views, containing
         # sub-folder names that correspond to gesture labels
         self.camera = "Below_CAM"
-        self.gesture_labels = ["F", "G", "L", "O", "Y"]
+        self.gesture_labels = ["F", "G", "L", "O", "Y", "unk"]
 
         # Encode gesture_labels as numeric
         label_encoder = preprocessing.LabelEncoder()

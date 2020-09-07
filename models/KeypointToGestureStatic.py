@@ -7,7 +7,7 @@ class KeypointToGestureStatic(nn.Module):
         super(KeypointToGestureStatic, self).__init__()
         self.fc1 = nn.Linear(21*3, 40)
         self.fc2 = nn.Linear(40, 20)
-        self.fc3 = nn.Linear(20, 5)
+        self.fc3 = nn.Linear(20, 6)
 
     def forward(self, x):
         out = F.relu(self.fc1(x))
