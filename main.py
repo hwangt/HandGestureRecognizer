@@ -19,9 +19,9 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 
 from torch.utils.tensorboard import SummaryWriter
+from loss.center_loss import CenterLoss
 
-
-# from tensorboardX import SummaryWriter
+alpha = 0.2
 
 
 def main():
@@ -57,8 +57,8 @@ def main():
     print(f'Validation %: {validate_pct}, Validation samples: {validate_size}')
     print(f'Test %: {test_pct}, Test samples: {test_size}')
 
-    batch_size = 2
-    num_epochs = 150
+    batch_size = 4
+    num_epochs = 100
     # num_iter = math.ceil(train_size / batch_size)
     train_dataset, valid_dataset, test_dataset = torch.utils.data.dataset.random_split(dataset, dataset_lengths,
                                                                                        generator=torch.Generator().manual_seed(
@@ -88,6 +88,9 @@ def main():
     model = KeypointToGestureStatic().to(device)
     print(f'Model {model}')
 
+    # Create center loss function
+    center_loss = CenterLoss(num_classes=6, feat_dim=6, use_gpu=use_gpu)
+
     # Add model graph to Tensorboard
     tensorboard_root = '/home/thwang/runs'
     timestamp = datetime.datetime.now().strftime("%m-%d-%H-%M-%S")
@@ -96,14 +99,6 @@ def main():
     dataiter = iter(validate_dataloader)
     keypts, _ = dataiter.next()
     writer.add_graph(model, keypts.to(device))
-
-    # Add embedding visualization to tensorboard
-    # embeddings, labels = select_n_random(data=dataset.keypoints_files,
-    #                                  labels=dataset.labels,
-    #                                  n=50)
-    # class_labels = dataset.gesture_labels
-    # writer.add_embedding(mat=embeddings,
-    #                      )
 
     # Create the optimizer
     optimizer = torch.optim.Adam(model.parameters(),
@@ -114,20 +109,33 @@ def main():
                                  amsgrad=False
                                  )
 
+    params = list(model.parameters()) + list(center_loss.parameters())
+    # center_loss_optimizer = torch.optim.SGD(center_loss.parameters(), lr=0.5)
+    center_loss_optimizer = torch.optim.Adam(params,
+                                             lr=1e-3,
+                                             betas=(0.9, 0.999),
+                                             eps=1e-8,
+                                             weight_decay=0,
+                                             amsgrad=False
+                                             )
+
     best_loss = 100000
 
     for epoch in range(num_epochs):
+        start_time = time.perf_counter()
         train_loss = train(dataloader=train_dataloader,
                            model=model,
-                           optimizer=optimizer,
+                           optimizer=center_loss_optimizer,
                            use_gpu=use_gpu,
                            device=device,
+                           loss_fn=center_loss,
                            curr_epoch=epoch, )
 
         validate_loss = validate(dataloader=validate_dataloader,
                                  model=model,
                                  use_gpu=use_gpu,
                                  device=device,
+                                 loss_fn=center_loss,
                                  curr_epoch=epoch, )
 
         test_loss = test(dataset=dataset,
@@ -136,6 +144,7 @@ def main():
                          writer=writer,
                          use_gpu=use_gpu,
                          device=device,
+                         loss_fn=center_loss,
                          pr_curve=False, )
 
         loss_dict = {
@@ -154,6 +163,9 @@ def main():
             'optimizer_state_dict': optimizer.state_dict(),
             'best_loss': best_loss,
         }, is_best)
+        end_time = time.perf_counter()
+        print(
+            f'Epoch {epoch + 1}. Losses {loss_dict}. New best? {is_best}. Train time: {end_time - start_time:0.4f} sec')
 
     # PR curves in Tensorboard for the best model
     best_model = KeypointToGestureStatic()
@@ -166,12 +178,13 @@ def main():
          writer=writer,
          use_gpu=use_gpu,
          device=device,
-         pr_curve=True,)
+         loss_fn=center_loss,
+         pr_curve=True, )
     writer.close()
     return
 
 
-def train(dataloader, model, optimizer, use_gpu, device, curr_epoch):
+def train(dataloader, model, optimizer, use_gpu, device, loss_fn, curr_epoch):
     model.train()
     avg_loss = AverageMeter()
     for i, (keypoints, targets) in enumerate(dataloader):
@@ -183,20 +196,23 @@ def train(dataloader, model, optimizer, use_gpu, device, curr_epoch):
         optimizer.zero_grad()
 
         pred = model(input)
-        loss_fn = nn.CrossEntropyLoss()
-        loss = loss_fn(pred, targets)
+        xe_loss_fn = nn.CrossEntropyLoss()
+        loss = loss_fn(pred, targets) * alpha + xe_loss_fn(pred, targets)
+        # loss = xe_loss_fn(pred, targets)
         if use_gpu:
             avg_loss.update(loss.cpu())
         else:
             avg_loss.update(loss)
         loss.backward()
+        for param in loss_fn.parameters():
+            param.grad.data *= (1./alpha)
         optimizer.step()
 
     # avg loss in the epoch
     return avg_loss
 
 
-def validate(dataloader, model, use_gpu, device, curr_epoch):
+def validate(dataloader, model, use_gpu, device, loss_fn, curr_epoch):
     model.eval()
     avg_loss = AverageMeter()
 
@@ -209,15 +225,19 @@ def validate(dataloader, model, use_gpu, device, curr_epoch):
         with torch.no_grad():
             pred = model(input)
 
-        loss_fn = nn.CrossEntropyLoss()
-        loss = loss_fn(pred, targets)
-        avg_loss.update(loss)
+        xe_loss_fn = nn.CrossEntropyLoss()
+        loss = loss_fn(pred, targets) * alpha + xe_loss_fn(pred, targets)
+        # loss = xe_loss_fn(pred, targets)
+        if use_gpu:
+            avg_loss.update(loss.cpu())
+        else:
+            avg_loss.update(loss)
 
     # avg loss in epoch
     return avg_loss
 
 
-def test(dataset, dataloader, model, writer, use_gpu, device, pr_curve=False):
+def test(dataset, dataloader, model, writer, use_gpu, device, loss_fn, pr_curve=False):
     model.eval()
     avg_loss = AverageMeter()
     class_probs = []
@@ -230,9 +250,9 @@ def test(dataset, dataloader, model, writer, use_gpu, device, pr_curve=False):
             if use_gpu:
                 input, targets = input.to(device), targets.to(device)
 
-            output = model(input)
-            class_probs_batch = [F.softmax(el, dim=0) for el in output]
-            _, class_preds_batch = torch.max(output, 1)
+            pred = model(input)
+            class_probs_batch = [F.softmax(el, dim=0) for el in pred]
+            _, class_preds_batch = torch.max(pred, 1)
             if use_gpu:
                 class_probs_batch = [p.to(device) for p in class_probs_batch]
                 class_probs.append(class_probs_batch)
@@ -241,9 +261,14 @@ def test(dataset, dataloader, model, writer, use_gpu, device, pr_curve=False):
                 class_probs.append(class_probs_batch)
                 class_preds.append(class_preds_batch)
 
-            loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(output, targets)
-            avg_loss.update(loss)
+            xe_loss_fn = nn.CrossEntropyLoss()
+            loss = loss_fn(pred, targets) * alpha + xe_loss_fn(pred, targets)
+            # loss = xe_loss_fn(pred, targets)
+
+            if use_gpu:
+                avg_loss.update(loss.cpu())
+            else:
+                avg_loss.update(loss)
 
     test_probs = torch.cat([torch.stack(batch) for batch in class_probs])
     test_preds = torch.cat(class_preds)
