@@ -3,8 +3,11 @@ import torch.nn.functional as F
 import torch
 
 class KeypointToGestureStatic(nn.Module):
-    def __init__(self):
+    def __init__(self, device='cpu'):
         super(KeypointToGestureStatic, self).__init__()
+
+        self.device = device
+
         self.fc1 = nn.Linear(21*3, 40)
         self.fc2 = nn.Linear(40, 20)
         self.fc3 = nn.Linear(20, 6)
@@ -17,12 +20,12 @@ class KeypointToGestureStatic(nn.Module):
 
     def load_checkpoint_for_inference(self, file):
         #Assumes loading from file with dict containing various kvp including the model_state_dict
-        checkpoint = torch.load(file)
+        checkpoint = torch.load(file, map_location=torch.device(self.device))
         self.load_state_dict(checkpoint['model_state_dict'])
         self.eval()
 
     def load_model_for_inference(self, file):
         #Assumes loading from file containing model.state_dict()
-        model = torch.load(file)
+        model = torch.load(file, map_location=torch.device(self.device))
         self.load_state_dict(model)
         self.eval()
