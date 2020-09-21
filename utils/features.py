@@ -81,12 +81,21 @@ def angle_features(keypoints_3d, segments=KEYPOINT_SEGMENTS, angles=SEGMENT_ANGL
     '''
 
     features = []
+
+    # If this is a (1, 21, 3) tensor, squeeze dim 0 because we need to operate on (21,3)
+    if len(keypoints_3d.shape) == 3:
+        keypoints_3d_shaped = torch.squeeze(keypoints_3d, 0)
+    else:
+        keypoints_3d_shaped = keypoints_3d
     for seg_first, seg_second in angles:
-        vec_first = get_seg(keypoints_3d, segments, seg_first)
-        vec_second = get_seg(keypoints_3d, segments, seg_second)
-        angle = torch.acos(torch.dot(vec_first, vec_second) / (torch.norm(vec_first) * torch.norm(vec_second)))
+        vec_first = get_seg(keypoints_3d_shaped, segments, seg_first)
+        vec_second = get_seg(keypoints_3d_shaped, segments, seg_second)
+        t = torch.dot(vec_first, vec_second) / (torch.norm(vec_first) * torch.norm(vec_second))
+        t= torch.clamp(t, min=-1.0, max=1.0) #need to clamp to valid range for numerical stability
+        angle = torch.acos(t)
         features.append(angle)
-    return torch.rad2deg(torch.stack(features, dim=0))
+    # return torch.rad2deg(torch.stack(features, dim=0))
+    return torch.stack(features, dim=0)
 
 
 def palm_normal(keypoints_3d, segments=KEYPOINT_SEGMENTS):
@@ -95,4 +104,10 @@ def palm_normal(keypoints_3d, segments=KEYPOINT_SEGMENTS):
     :param keypoints_3d:
     :return:
     '''
-    return torch.cross(get_seg(keypoints_3d, segments, "0_5"), get_seg(keypoints_3d, segments, "0_17"))
+    # If this is a (1, 21, 3) tensor, squeeze dim 0 because we need to operate on (21,3)
+    if len(keypoints_3d.shape) == 3:
+        keypoints_3d_shaped = torch.squeeze(keypoints_3d, 0)
+    else:
+        keypoints_3d_shaped = keypoints_3d
+
+    return torch.cross(get_seg(keypoints_3d_shaped, segments, "0_5"), get_seg(keypoints_3d_shaped, segments, "0_17"))
